@@ -1,4 +1,4 @@
-"""Software simulator: authenticated sessions and encrypted telemetry only."""
+"""Software simulator with secure telemetry, commands and session lifecycle."""
 import argparse
 import logging
 import math
@@ -8,9 +8,10 @@ from queue import Empty
 
 from securemesh.config import Settings
 from securemesh.device.state import load_handshake
+from securemesh.device.commands import CommandHandler
 from securemesh.device.telemetry import generate_telemetry
 from securemesh.protocol import MessageType, canonical_json, device_topic, handshake_topic, parse_json
-from securemesh.security.envelopes import accept_ready, encrypt_message
+from securemesh.security.envelopes import accept_ready, encrypt_message, decrypt_message
 from securemesh.security.identity import IdentityError
 from securemesh.security.sessions import SecurityError, now_ms
 from securemesh.server.main import configure_logging
@@ -21,8 +22,11 @@ logger = logging.getLogger("securemesh.device")
 
 def run_device(settings: Settings, device_id: str, interval: float, count: int = 0) -> None:
     handshake = load_handshake(settings, device_id)
+    handler = CommandHandler(settings.runtime_dir / "devices" / device_id / "state.db",device_id,
+        event=lambda code: logger.info(code,extra={"device_id":device_id}),
+        max_clock_skew_ms=settings.max_clock_skew_seconds * 1000)
     transport = MQTTTransport(settings, f"securemesh-{device_id}-{secrets.token_hex(4)}", [
-        handshake_topic(device_id, "response"), handshake_topic(device_id, "ready")])
+        handshake_topic(device_id, "response"), handshake_topic(device_id, "ready"), device_topic(device_id, MessageType.COMMAND)])
     session = None
     generation = 0
     deadline = 0.0
@@ -37,6 +41,16 @@ def run_device(settings: Settings, device_id: str, interval: float, count: int =
             logger.warning("device_publish_failed", extra={"device_id": device_id})
             return False
 
+    def rotate_if_due() -> None:
+        nonlocal session, deadline
+        if session and (now_ms() >= session.expires_at or
+                        session.send_sequence >= session.max_messages or
+                        session.receive_sequence >= session.max_messages):
+            session.authenticated = False
+            handler.event("session_rotation")
+            session = None
+            deadline = 0
+
     try:
         transport.start()
         while count == 0 or sent < count:
@@ -47,6 +61,9 @@ def run_device(settings: Settings, device_id: str, interval: float, count: int =
                 continue
             if generation != transport.generation:
                 generation = transport.generation
+                if session:
+                    session.authenticated=False
+                    handler.event("session_rotation")
                 session = None
                 deadline = 0
                 # Old queued replies cannot confirm a new hello transcript.
@@ -55,9 +72,7 @@ def run_device(settings: Settings, device_id: str, interval: float, count: int =
                         transport.messages.get_nowait()
                     except Empty:
                         break
-            if session and (now_ms() >= session.expires_at or session.send_sequence >= session.max_messages):
-                session = None
-                deadline = 0
+            rotate_if_due()
             if session is None and monotonic >= deadline:
                 hello = handshake.start()
                 if not publish(handshake_topic(device_id, "hello"), canonical_json(hello)):
@@ -70,7 +85,26 @@ def run_device(settings: Settings, device_id: str, interval: float, count: int =
                 if incoming.retained:
                     raise SecurityError("retained_message_rejected")
                 message = parse_json(incoming.payload)
-                if incoming.topic == handshake_topic(device_id, "response") and session is None:
+                if incoming.topic == device_topic(device_id, MessageType.COMMAND):
+                    if session is None: raise SecurityError('invalid_session')
+                    if message.get('message_type') == 'session_control':
+                        with session.lock:
+                            payload = decrypt_message(session,message,'session_control')
+                            if payload != {'session_id':session.session_id,'action':'rotate'}:
+                                raise SecurityError('invalid_session_control')
+                            session.receive_sequence=message['sequence']
+                            session.authenticated=False
+                        session=None
+                        deadline=0
+                    else:
+                        ack = handler.process(session,message)
+                        publish(device_topic(device_id,MessageType.ACK),canonical_json(ack))
+                        if handler.restart_requested:
+                            handler.restart_requested=False
+                            session.authenticated=False
+                            session=None
+                            deadline=0
+                elif incoming.topic == handshake_topic(device_id, "response") and session is None:
                     finish = handshake.accept_response(message)
                     publish(handshake_topic(device_id, "finish"), canonical_json(finish))
                 elif incoming.topic == handshake_topic(device_id, "ready") and session is None:
@@ -89,15 +123,23 @@ def run_device(settings: Settings, device_id: str, interval: float, count: int =
             except (ValueError, TypeError, KeyError, AttributeError):
                 # Do not let a forged response force a counter reset or restart.
                 logger.warning("device_handshake_rejected", extra={"device_id": device_id})
+            # A command ACK may consume the final send counter in this iteration.
+            rotate_if_due()
             if session and time.monotonic() >= next_send:
-                envelope = encrypt_message(session, generate_telemetry(), "telemetry")
+                reading = generate_telemetry()
+                state = handler.state
+                reading["status"] = "running" if state["state"] == "RUNNING" else "idle"
+                reading["device_state"] = state
+                if not state["configuration"]["location_enabled"]:
+                    reading["location"] = {"latitude":0.0,"longitude":0.0}
+                envelope = encrypt_message(session, reading, "telemetry")
                 if not publish(device_topic(device_id, MessageType.TELEMETRY), canonical_json(envelope)):
                     # The old counter is burned. Recovery uses entirely new session keys.
                     session = None
                     deadline = 0
                     continue
                 sent += 1
-                next_send = time.monotonic() + interval
+                next_send = time.monotonic() + (state["configuration"]["telemetry_interval"] if state["last_command"] else interval)
                 logger.info("telemetry_published", extra={"device_id": device_id,
                             "session_id": session.session_id, "sequence": envelope["sequence"]})
     finally:

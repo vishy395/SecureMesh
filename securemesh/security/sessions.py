@@ -233,6 +233,8 @@ class DeviceHandshake:
     def start(self) -> dict:
         # Every attempt, including a retry, gets a new challenge and ephemeral key.
         self.ephemeral = X25519PrivateKey.generate()
+        if self.session is not None:
+            self.session.authenticated = False
         self.session = None
         self.hello = {"version": PROTOCOL_VERSION, "type": "hello", "device_id": self.device_id,
                       "server_identity": self.settings.server_identity, "server_fingerprint": fingerprint(self.trusted_server),

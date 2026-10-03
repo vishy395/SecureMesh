@@ -91,7 +91,18 @@ def require_int(value: Any, *, minimum: int = 0, maximum: int = 2**63 - 1) -> in
 
 
 def validate_telemetry(message: dict) -> dict:
-    require_fields(message, {"version", "temperature", "battery", "cpu_usage", "status", "location", "timestamp"})
+    fields = {"version", "temperature", "battery", "cpu_usage", "status", "location", "timestamp"}
+    require_fields(message, fields | ({"device_state"} if "device_state" in message else set()))
+    if "device_state" in message:
+        state = message["device_state"]
+        require_fields(state, {"state","threshold","configuration","last_command","last_command_sequence","restart_count"})
+        if state["state"] not in {"RUNNING","STOPPED"}: raise ValueError("Invalid lifecycle state")
+        from securemesh.commands import validate_parameters, validate_command_id
+        validate_parameters("CHANGE_THRESHOLD", {"threshold":state["threshold"]})
+        validate_parameters("UPDATE_CONFIG", state["configuration"])
+        require_int(state["last_command_sequence"])
+        require_int(state["restart_count"])
+        if state["last_command"] is not None: validate_command_id(state["last_command"])
     if type(message["version"]) is not int or message["version"] != PROTOCOL_VERSION:
         raise ValueError("Invalid telemetry version")
     require_int(message["timestamp"])

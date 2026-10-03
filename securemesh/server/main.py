@@ -8,14 +8,18 @@ from queue import Empty
 from threading import Event, Thread
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict
+from securemesh.security.sessions import SecurityError
+from securemesh.server.repository import RegistryError
+from securemesh.commands import validate_parameters
 
 from securemesh.config import Settings
 from securemesh.security.identity import load_certificate, load_private_key, validate_ca_certificate, validate_server_certificate
 from securemesh.server.repository import DeviceRepository
 from securemesh.server.service import DeviceService, TelemetryService
 from securemesh.transport.mqtt import MQTTTransport
-from securemesh.protocol import TOPIC_PREFIX
+from securemesh.protocol import TOPIC_PREFIX, validate_device_id
 
 
 class JsonFormatter(logging.Formatter):
@@ -64,7 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             telemetry_service = TelemetryService(config, app.state.service, server_key, server_certificate)
             transport = MQTTTransport(config, "securemesh-control-center", [
                 f"{TOPIC_PREFIX}/+/handshake/hello", f"{TOPIC_PREFIX}/+/handshake/finish",
-                f"{TOPIC_PREFIX}/+/telemetry"])
+                f"{TOPIC_PREFIX}/+/telemetry", f"{TOPIC_PREFIX}/+/acks"])
             transport.start()
 
             def receive() -> None:
@@ -85,6 +89,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             worker = Thread(target=receive, name="securemesh-telemetry", daemon=True)
             worker.start()
+        app.state.control = telemetry_service
         app.state.transport = transport
         logging.getLogger("securemesh").info("control_center_started")
         try:
@@ -103,12 +108,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/health")
     def health() -> dict:
         transport = application.state.transport
-        return {"status": "running", "service": "SecureMesh control center", "stage": 2,
+        return {"status": "running", "service": "SecureMesh control center", "stage": 3,
                 "mqtt": "connected" if transport and transport.connected.is_set() else "disconnected" if transport else "disabled"}
 
     @application.get("/api/devices")
     def devices() -> list[dict]:
         return application.state.service.list_devices()
+
 
     @application.get("/api/telemetry")
     def telemetry() -> list[dict]:
@@ -121,6 +127,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/api/sessions")
     def sessions() -> list[dict]:
         return application.state.service.repository.list_sessions()
+
+    class CommandRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid', strict=True)
+        command_type: str
+        parameters: dict
+
+    def control():
+        if application.state.control is None or application.state.transport is None:
+            raise HTTPException(503, 'MQTT control unavailable')
+        return application.state.control
+
+    @application.post('/api/devices/{device_id}/commands', status_code=201)
+    def command(device_id: str, request: CommandRequest) -> dict:
+        try:
+            validate_device_id(device_id)
+            validate_parameters(request.command_type,request.parameters)
+            record = application.state.service.repository.get_device(device_id)
+            if record is None: raise SecurityError('unknown_device')
+            if record['revoked_at'] or record['status']=='revoked': raise SecurityError('revoked_device')
+            return control().send_command(device_id,request.command_type,request.parameters,application.state.transport.publish)
+        except ValueError as exc:
+            if not isinstance(exc,SecurityError): raise HTTPException(422,'invalid_device_id') from exc
+            if exc.code in {'invalid_parameters','unsupported_command','revoked_device'}:
+                event = 'revoked_device_command_attempt' if exc.code=='revoked_device' else exc.code
+                application.state.service.repository.record_event(event,device_id)
+            raise HTTPException(404 if exc.code=='unknown_device' else 422 if exc.code in {'invalid_parameters','unsupported_command'} else 409,exc.code) from exc
+
+    @application.get('/api/commands')
+    def commands() -> list[dict]:
+        return application.state.service.repository.list_commands()
+
+    @application.post('/api/devices/{device_id}/revoke')
+    def revoke(device_id: str) -> dict:
+        try:
+            if application.state.control:
+                application.state.control.revoke_device(device_id)
+            else:
+                application.state.service.revoke_device(device_id)
+            return {'device_id':device_id,'state':'REVOKED'}
+        except RegistryError as exc:
+            raise HTTPException(404,'unknown_device') from exc
+
+    @application.post('/api/devices/{device_id}/sessions/rotate')
+    def rotate(device_id: str) -> dict:
+        try:
+            control().rotate_session(device_id,application.state.transport.publish)
+            return {'device_id':device_id,'status':'ROTATION_REQUESTED'}
+        except SecurityError as exc:
+            raise HTTPException(409,exc.code) from exc
+
 
     return application
 
