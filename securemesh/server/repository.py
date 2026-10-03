@@ -1,9 +1,13 @@
 """Small SQLite registry; private keys are never stored here."""
 import sqlite3
+import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    from securemesh.security.sessions import Session
 
 
 class RegistryError(ValueError):
@@ -36,6 +40,80 @@ class DeviceRepository:
                 status TEXT NOT NULL CHECK(status IN ('registered', 'revoked')),
                 last_seen TEXT
             )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY, device_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+                receive_sequence INTEGER NOT NULL DEFAULT 0,
+                send_sequence INTEGER NOT NULL DEFAULT 0,
+                authenticated INTEGER NOT NULL, active INTEGER NOT NULL,
+                transcript_hash TEXT NOT NULL
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL, received_at INTEGER NOT NULL,
+                payload TEXT NOT NULL, UNIQUE(session_id, sequence)
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS security_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+                device_id TEXT, session_id TEXT, recorded_at TEXT NOT NULL
+            )""")
+
+    def invalidate_sessions(self, session_id: str | None = None) -> None:
+        with self._connection() as connection:
+            if session_id is None:
+                connection.execute("UPDATE sessions SET active = 0")
+            else:
+                connection.execute("UPDATE sessions SET active = 0 WHERE session_id = ?", (session_id,))
+
+    def create_session(self, session: "Session") -> None:
+        # Deliberate metadata allowlist: no serialization of Session/key objects.
+        with self._connection() as connection:
+            connection.execute("UPDATE sessions SET active = 0 WHERE device_id = ?", (session.device_id,))
+            connection.execute("""INSERT INTO sessions
+                (session_id, device_id, created_at, expires_at, receive_sequence, send_sequence,
+                 authenticated, active, transcript_hash) VALUES (?, ?, ?, ?, 0, ?, 1, 1, ?)""",
+                (session.session_id, session.device_id, session.created_at, session.expires_at,
+                 session.send_sequence, session.transcript_hash))
+
+    def store_telemetry(self, session_id: str, device_id: str, sequence: int,
+                        payload: dict, received_at: int) -> None:
+        with self._connection() as connection:
+            # This transaction commits replay state, telemetry and last_seen together.
+            connection.execute("BEGIN IMMEDIATE")
+            result = connection.execute("""UPDATE sessions SET receive_sequence = ?
+                WHERE session_id = ? AND device_id = ? AND active = 1 AND authenticated = 1
+                AND expires_at > ? AND receive_sequence < ?
+                AND EXISTS (SELECT 1 FROM devices WHERE device_id = ? AND revoked_at IS NULL AND status = 'registered')""",
+                (sequence, session_id, device_id, received_at, sequence, device_id))
+            if result.rowcount != 1:
+                raise RegistryError("Session state changed before telemetry commit")
+            connection.execute("""INSERT INTO telemetry
+                (device_id, session_id, sequence, timestamp, received_at, payload) VALUES (?, ?, ?, ?, ?, ?)""",
+                (device_id, session_id, sequence, payload["timestamp"], received_at,
+                 json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)))
+            connection.execute("UPDATE devices SET last_seen = ? WHERE device_id = ?",
+                               (datetime.fromtimestamp(received_at / 1000, timezone.utc).isoformat(), device_id))
+
+    def record_event(self, event_type: str, device_id: str | None = None,
+                     session_id: str | None = None) -> None:
+        with self._connection() as connection:
+            connection.execute("""INSERT INTO security_events
+                (event_type, device_id, session_id, recorded_at) VALUES (?, ?, ?, ?)""",
+                (event_type, device_id, session_id, datetime.now(timezone.utc).isoformat()))
+
+    def list_sessions(self) -> list[dict]:
+        with self._connection() as connection:
+            return [dict(row) for row in connection.execute("SELECT * FROM sessions ORDER BY created_at DESC LIMIT 100")]
+
+    def list_telemetry(self, limit: int = 100) -> list[dict]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM telemetry ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
+
+    def list_security_events(self, limit: int = 100) -> list[dict]:
+        with self._connection() as connection:
+            return [dict(row) for row in connection.execute("SELECT * FROM security_events ORDER BY id DESC LIMIT ?", (limit,))]
 
     def register_device(self, device_id: str, certificate_fingerprint: str,
                         certificate: str) -> dict:

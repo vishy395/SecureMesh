@@ -163,3 +163,53 @@ def validate_device_certificate(cert: x509.Certificate, ca_cert: x509.Certificat
     except (InvalidSignature, ValueError, x509.ExtensionNotFound) as exc:
         raise IdentityError(f"Device certificate rejected: {exc}" if isinstance(exc, IdentityError)
                             else "Device certificate rejected") from exc
+
+
+def issue_server_certificate(server_id: str, server_key: Ed25519PrivateKey,
+                             ca_key: Ed25519PrivateKey, ca_cert: x509.Certificate) -> x509.Certificate:
+    """Offline issuance of a distinct server role; device certificates cannot act as servers."""
+    validate_device_id(server_id)
+    validate_ca_certificate(ca_cert)
+    if ca_key.public_key().public_bytes_raw() != ca_cert.public_key().public_bytes_raw():
+        raise IdentityError("CA key does not match CA certificate")
+    now = datetime.now(timezone.utc)
+    return (x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, server_id)]))
+            .issuer_name(ca_cert.subject).public_key(server_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(max(now - timedelta(minutes=5), ca_cert.not_valid_before_utc))
+            .not_valid_after(min(now + timedelta(days=365), ca_cert.not_valid_after_utc))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(_usage(ca=False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([x509.UniformResourceIdentifier(
+                f"urn:securemesh:server:{server_id}")]), critical=False)
+            .sign(ca_key, algorithm=None))
+
+
+def validate_server_certificate(cert: x509.Certificate, ca_cert: x509.Certificate, server_id: str,
+                                *, expected_fingerprint: str | None = None) -> str:
+    try:
+        validate_device_id(server_id)
+        validate_ca_certificate(ca_cert)
+        _check_profile(cert, datetime.now(timezone.utc))
+        cert.verify_directly_issued_by(ca_cert)
+        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        usage = cert.extensions.get_extension_for_class(x509.KeyUsage)
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        if len(cn) != 1 or cn[0].value != server_id or san.get_values_for_type(x509.UniformResourceIdentifier) != [f"urn:securemesh:server:{server_id}"]:
+            raise IdentityError("Invalid server identity")
+        if not constraints.critical or constraints.value.ca or not usage.critical or not usage.value.digital_signature or usage.value.key_cert_sign or usage.value.key_agreement:
+            raise IdentityError("Invalid server certificate usage")
+        if set(eku) != {ExtendedKeyUsageOID.SERVER_AUTH}:
+            raise IdentityError("Invalid server certificate role")
+        if cert.not_valid_before_utc < ca_cert.not_valid_before_utc or cert.not_valid_after_utc > ca_cert.not_valid_after_utc:
+            raise IdentityError("Server validity exceeds CA validity")
+        result = fingerprint(cert)
+        if expected_fingerprint is not None and result != expected_fingerprint:
+            raise IdentityError("Server certificate does not match trusted pin")
+        return result
+    except (InvalidSignature, ValueError, x509.ExtensionNotFound) as exc:
+        raise IdentityError("Server certificate rejected") from exc

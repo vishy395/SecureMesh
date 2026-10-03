@@ -1,4 +1,4 @@
-# Stage 1 threat model
+# SecureMesh threat model through Stage 2
 
 ## Trusted components
 
@@ -17,10 +17,32 @@ CA trust derives from trusted configuration, not merely from the CA being self-s
 
 ## Remaining limitations
 
-Stage 1 cannot demonstrate end-to-end secure traffic. A certificate is public and does not itself authenticate a live sender. Proof of private-key possession, signed handshakes, authenticated encryption, replay defenses, command deduplication and network attack demonstrations arrive in subsequent stages.
+Stage 2 authenticates live peers through signed ephemeral handshakes and protects telemetry with AEAD, strict sequence checks and bounded freshness. This custom educational protocol is not independently audited. Commands, command deduplication, attack runner and dashboard remain unimplemented.
 
-Revocation currently affects registry/service validation; there are no active sessions, CRLs or device-side revocation distribution. Stolen valid keys permit impersonation in later communication unless revoked. Availability against dropping/flooding and compromised trusted endpoints is outside the cryptographic guarantees. Clock accuracy is assumed for validity checks.
+Basic revocation is checked during handshake and telemetry admission. CRLs and device-side revocation distribution are not implemented. Stolen valid identity keys permit new-session impersonation until revoked. Availability against dropping/flooding and compromised trusted endpoints is outside the cryptographic guarantees. Clock accuracy is assumed for certificate/session validity and freshness checks.
 
 The API is loopback-only by default and read-only, with no administrator authentication yet. The provisioning CLI is an administrator trust boundary. Restrict local files and do not expose the API externally. Development private keys are unencrypted PEM: POSIX permissions are requested where supported; Windows requires appropriate inherited ACLs. The offline CA must not share its private key with device directories.
 
-Application logging uses a selected metadata allowlist. Persistent audit-event storage and authenticated administrative operations are planned, not completed in Stage 1.
+Application logging uses a selected metadata allowlist. Sanitized security events persist in SQLite. Administrative authentication, protected audit storage and audit retention/rate limits remain future work.
+
+## Threats addressed by Stage 2
+
+| Threat | Control and boundary |
+| --- | --- |
+| Passive network/broker observer | AES-256-GCM hides telemetry values. Public certificates, device IDs, topics, timing and message sizes remain visible. Plain MQTT credentials are also visible on the transport; they are not identity credentials. |
+| Message tampering | AEAD authenticates ciphertext, nonce and security-sensitive headers. Invalid tags/headers cannot update replay state or last_seen. |
+| MITM ephemeral-key substitution | Signed canonical transcripts bind both ephemeral keys, challenges, identities, fingerprints, version and session lifetime. |
+| Replay | Signed hello challenge cache; single-use finish state; authenticated strictly increasing telemetry counters and conditional SQLite commit. |
+| Stale/delayed messages | Handshake challenge expiry and authenticated telemetry timestamp age/future-skew limits. Sequences remain the main replay defense. |
+| Forged device | CA/profile/identity checks, registry fingerprint pin and Ed25519 proof of possession. A broker topic or valid but unregistered certificate is insufficient. |
+| Forged server | Distinct server-authentication certificate role, CA validation, exact locally pinned server fingerprint, transcript signature and encrypted ready/key confirmation. |
+| Session hijacking | Transcript-bound X25519/HKDF keys, independent directional keys, session/topic identity checks and authenticated metadata prevent traffic injection without session keys. |
+| Later identity-key compromise | Fresh ephemeral keys provide forward secrecy for earlier completed sessions assuming ephemeral/session material was not captured. Python cannot guarantee secret-memory erasure. |
+
+## Operational limitations
+
+Local filesystem/SQLite/control-center/device processes remain trusted. Development keys and broker client credentials are unencrypted files; Windows ACLs must protect them. The server loads its own identity key but never the CA private key. Do not distribute the server private key or CA directory to devices; only public trust anchors are needed there.
+
+The API exposes decrypted telemetry to the trusted local operator and remains unauthenticated/read-only on loopback. It must not be exposed publicly. One control-center process owns in-memory sessions; multiple Uvicorn workers/instances are unsupported. Server restart invalidates sessions rather than recovering keys. Device restart/reconnect uses new keys, never persisted counters with reused keys. A server-only restart is recovered immediately by restarting the device, or eventually by session expiry.
+
+The broker can always drop/delay traffic or disconnect clients. Strict replay policy intentionally discards reordered messages, and QoS duplicates may generate rejection events. There is no application telemetry acknowledgement or delivery guarantee. Pending handshakes and receive queues are bounded, but event-log growth and all forms of denial of service are not solved. Identity rotation and the full revocation workflow remain deferred.

@@ -6,7 +6,7 @@ from pathlib import Path
 from securemesh.config import Settings
 from securemesh.protocol import validate_device_id
 from securemesh.security.identity import (IdentityError, certificate_pem, create_ca, generate_private_key,
-    issue_device_certificate, load_certificate, load_private_key, save_private_key,
+    issue_device_certificate, issue_server_certificate, load_certificate, load_private_key, save_private_key,
     validate_ca_certificate, write_new_file)
 from securemesh.server.main import configure_logging
 from securemesh.server.repository import DeviceRepository, RegistryError
@@ -42,6 +42,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--init-ca", action="store_true")
+    actions.add_argument("--init-server", action="store_true")
     actions.add_argument("--device-id")
     actions.add_argument("--register-certificate", type=Path)
     actions.add_argument("--revoke-device")
@@ -55,6 +56,16 @@ def main() -> None:
         if args.init_ca:
             initialize_ca(settings, ca_key_path)
             print(f"CA initialized: {settings.ca_cert_path}")
+            return
+        if args.init_server:
+            if settings.server_key_path.exists() or settings.server_cert_path.exists():
+                raise IdentityError("Server identity already exists; refusing to overwrite")
+            ca_cert = load_certificate(settings.ca_cert_path.read_bytes())
+            key = generate_private_key()
+            cert = issue_server_certificate(settings.server_identity, key, load_private_key(ca_key_path), ca_cert)
+            save_private_key(key, settings.server_key_path)
+            write_new_file(settings.server_cert_path, certificate_pem(cert))
+            print(f"Server identity initialized: {settings.server_cert_path}")
             return
         repository = DeviceRepository(settings.database_path)
         repository.initialize()
