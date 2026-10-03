@@ -1,4 +1,4 @@
-# SecureMesh threat model through Stage 3
+# SecureMesh threat model through Stage 5
 
 ## Trusted components
 
@@ -17,7 +17,7 @@ CA trust derives from trusted configuration, not merely from the CA being self-s
 
 ## Remaining limitations
 
-SecureMesh authenticates live peers through signed ephemeral handshakes and protects telemetry with AEAD, strict sequence checks and bounded freshness. This custom educational protocol is not independently audited. Stage 3 implements commands, durable deduplication, acknowledgements and session/device lifecycle. Attack runner and dashboard remain unimplemented.
+SecureMesh authenticates live peers through signed ephemeral handshakes and protects telemetry with AEAD, strict sequence checks and bounded freshness. This custom educational protocol is not independently audited. Stage 3 implements commands, durable deduplication, acknowledgements and session/device lifecycle. Stages 4 and 5 add the operational dashboard and controlled local attack runner.
 
 Revocation invalidates active sessions and is checked during handshake, telemetry, commands and acknowledgement admission. CRLs and device-side revocation distribution are not implemented. Stolen valid identity keys permit new-session impersonation until revoked. Availability against dropping/flooding and compromised trusted endpoints is outside the cryptographic guarantees. Clock accuracy is assumed for certificate/session validity and freshness checks.
 
@@ -71,4 +71,11 @@ Revocation is authoritative at the server. No distributed CRL or instantaneous d
 
 Deduplication protects simulated effects because effects and IDs share one local SQLite transaction. It does not claim exactly-once execution of future physical hardware or external side effects. Trusted storage must remain intact; deleting or restoring older simulator state can erase deduplication evidence. Process crashes after commit but before ACK leave a completed local effect and an uncertain server status. Fresh valid redelivery can acknowledge it; automatic retry/reconciliation is not implemented. Loss, ordering and ACK delays can produce EXPIRED even after execution.
 
-Explicit rotation notification can be dropped by a hostile broker. Old keys remain rejected at the server, while recovery waits for reconnect or local expiry. Python cannot prove secret-memory erasure. Unbounded dedup/event history, audit tampering by trusted filesystem users and denial of service remain operational limitations. No dashboard, attack simulator, additional database service or identity-key rotation is introduced.
+Explicit rotation notification can be dropped by a hostile broker. Old keys remain rejected at the server, while recovery waits for reconnect or local expiry. Python cannot prove secret-memory erasure. Unbounded dedup/event history, audit tampering by trusted filesystem users and denial of service remain operational limitations. Identity-key rotation and additional database services remain outside scope.
+
+
+## Final attack coverage (Stage 5)
+
+Real loopback MQTT demonstrations cover ciphertext/AAD tampering, telemetry replay, command redelivery without repeated effects, three device impersonation variants, signed-hello ephemeral substitution, authenticated stale telemetry with fresh recovery, and revoked-device telemetry/authentication/command issuance. The dashboard displays persisted backend events. See [attack demonstrations](attack-demonstrations.md) for preconditions, evidence and exact boundaries and [final validation](final-security-validation.md) for measured results.
+
+The external actor has broker credentials; these grant transport publication, not identity. Public victim certificates plus an independent attacker key cannot authenticate. Only controlled stale/MITM fixtures use authorized device identity material to construct a valid baseline, through the normal protocol. No endpoint bypass or relaxed production validator is introduced. Revocation does not retract valid commands already in transit. Availability, compromised endpoints/CA, immediate distributed revocation and physical exactly-once effects are NOT COVERED. Forward secrecy against later identity-only compromise is THEORETICALLY PROTECTED by ephemeral X25519, subject to trusted endpoints and uncaptured ephemeral/session material; the attack suite does not empirically demonstrate memory erasure or post-compromise recovery.

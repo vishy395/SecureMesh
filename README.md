@@ -2,7 +2,7 @@
 
 Cryptographic Command & Telemetry Network for IoT Devices, a college cyber defense project. All devices are Python simulators; no physical hardware is required.
 
-**Stages 1?4 are implemented:** offline CA, Ed25519/X.509 identities, SQLite registry, mutual authentication, ephemeral X25519 sessions, directional HKDF keys, AES-256-GCM telemetry and commands, authenticated acknowledgements, durable command deduplication, device lifecycle, revocation, session rotation and a local control-center dashboard. Attack simulator and long-term identity rotation remain future work.
+**Stages 1-5 are implemented:** offline CA, Ed25519/X.509 identities, SQLite registry, mutual authentication, ephemeral X25519 sessions, directional HKDF keys, AES-256-GCM telemetry and commands, authenticated acknowledgements, durable command deduplication, device lifecycle, revocation, session rotation and a local control-center dashboard. Stage 5 adds a local MQTT attack simulator and final security validation; long-term identity rotation remains future work.
 
 ## Architecture
 
@@ -230,3 +230,69 @@ git diff --check
 ```
 
 The live dashboard test launches isolated Mosquitto, FastAPI and three actual simulators; it uses the rendered UI to issue all five commands, waits for authenticated ACKs, verifies restart and revocation, and checks security-event rendering. It creates disposable registrations and does not revoke your existing workspace devices. It captures desktop/mobile review images under ignored `runtime/stage4-review/`. The test requires Mosquitto and a supported browser and must pass without skipping for full Stage 4 validation. No frontend lint/type-check configuration exists; native module parsing, data mapping and interaction behavior are exercised in the real browser.
+
+## SECURITY DEMONSTRATION (Stage 5)
+
+Use disposable ACTIVE registrations. The complete suite permanently revokes device-02 and uses its identity for a controlled stale-message fixture. It leaves device-01/device-03 running. Installation, provisioning and one-time broker setup commands are above.
+
+Start Mosquitto in terminal 1:
+
+```powershell
+& .\runtime\tools\mosquitto\mosquitto.exe -c .\runtime\mqtt\mosquitto.conf
+```
+
+Start FastAPI in terminal 2:
+
+```powershell
+$env:SECUREMESH_MQTT_ENABLED='true'
+.\.venv\Scripts\python.exe -m securemesh.server.main
+```
+
+Start one device in each of terminals 3, 4 and 5:
+
+```powershell
+.\.venv\Scripts\python.exe -m securemesh.device.main --device-id device-01 --interval 1
+.\.venv\Scripts\python.exe -m securemesh.device.main --device-id device-02 --interval 1
+.\.venv\Scripts\python.exe -m securemesh.device.main --device-id device-03 --interval 1
+```
+
+Open the dashboard and issue a normal command in terminal 6:
+
+```powershell
+Start-Process 'http://127.0.0.1:8000/'
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/devices/device-01/commands -ContentType 'application/json' -Body '{"command_type":"START","parameters":{}}'
+Invoke-RestMethod http://127.0.0.1:8000/api/commands
+```
+
+Wait for EXECUTED and its authenticated acknowledgement. Run the full suite on a fresh disposable setup, or the individual commands below. Do not run `all` after an individual revocation:
+
+```powershell
+.\.venv\Scripts\python.exe -m securemesh.attacks.main --list
+.\.venv\Scripts\python.exe -m securemesh.attacks.main all
+```
+
+Individual scenarios:
+
+```powershell
+.\.venv\Scripts\python.exe -m securemesh.attacks.main replay --device-id device-01
+.\.venv\Scripts\python.exe -m securemesh.attacks.main tamper --device-id device-01
+.\.venv\Scripts\python.exe -m securemesh.attacks.main impersonate --device-id device-01
+.\.venv\Scripts\python.exe -m securemesh.attacks.main mitm --device-id device-01
+# Stop device-02's simulator before this controlled session; restart it afterward.
+.\.venv\Scripts\python.exe -m securemesh.attacks.main stale --device-id device-02
+# With ACTIVE device-02 publishing again, this permanently revokes it:
+.\.venv\Scripts\python.exe -m securemesh.attacks.main revoked --device-id device-02
+```
+
+All traffic targets loopback only. Optional `--url http://127.0.0.1:<port>` selects the local API; MQTT/runtime settings use existing environment configuration. JSON results require persisted backend evidence. A failed capture/verification prints INCONCLUSIVE and exits 1. Security Events shows the actual persisted rejections; exact command redelivery is safely acknowledged as ALREADY_PROCESSED and displays the existing DUPLICATE_COMMAND / ACCEPTED event, while the repeated effect is BLOCKED.
+
+Repeatable isolated live demonstration, including real broker, FastAPI, three simulator processes, normal authenticated commands, all 12 attack cases, browser Security Events and continuity after revocation:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/frontend/test_live_attacks.py -v -s
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pip check
+git diff --check
+```
+
+The live test requires Mosquitto and a supported installed browser, as described above. Evidence and screenshot are saved under ignored `runtime/stage5-review/`. It uses temporary identities and never revokes workspace registrations. See [attack demonstrations](docs/attack-demonstrations.md) and [final validation](docs/final-security-validation.md) for precise scope and limitations.
