@@ -2,7 +2,7 @@
 
 Cryptographic Command & Telemetry Network for IoT Devices, a college cyber defense project. All devices are Python simulators; no physical hardware is required.
 
-**Stages 1?3 are implemented:** offline CA, Ed25519/X.509 identities, SQLite registry, mutual authentication, ephemeral X25519 sessions, directional HKDF keys, AES-256-GCM telemetry and commands, authenticated acknowledgements, durable command deduplication, device lifecycle, revocation and session rotation. Dashboard, attack simulator and long-term identity rotation remain future work.
+**Stages 1?4 are implemented:** offline CA, Ed25519/X.509 identities, SQLite registry, mutual authentication, ephemeral X25519 sessions, directional HKDF keys, AES-256-GCM telemetry and commands, authenticated acknowledgements, durable command deduplication, device lifecycle, revocation, session rotation and a local control-center dashboard. Attack simulator and long-term identity rotation remain future work.
 
 ## Architecture
 
@@ -173,3 +173,60 @@ Wait for the RESTART acknowledgement/new session before sending another device-0
 Stage 3 adds a server `commands` table and uses the existing `sessions.active` column for retained invalidation history; initialization upgrades an existing SQLite registry additively. Existing enrollment `registered`/`revoked` statuses map to API `state: ACTIVE/REVOKED`. Each simulator adds `state.db` with atomic simulated state, processed command IDs, delivery digests and sanitized events. No keys are stored in either database. Command/ACK envelope counters share the existing directional session counters.
 
 Limitations: the local operator API remains unauthenticated; keep it on loopback. ACK loss/reordering or a crash after execution can leave an uncertain/EXPIRED server status; automatic reconciliation/retries are not implemented. Server revocation immediately blocks admission but does not physically disconnect a device or retract an already-issued in-flight command. Local deduplication depends on intact trusted SQLite storage and currently has no retention cap. Lost explicit rotation notifications recover on reconnect/expiry. Simulated effects are transactional; no claim is made about exactly-once physical hardware effects. See [protocol](docs/protocol.md) and [threat model](docs/threat-model.md).
+
+
+## Stage 4 control-center dashboard
+
+The dashboard is served by FastAPI at **http://127.0.0.1:8000/**. There is no separate frontend server, Node installation or build step. Native JavaScript modules and project-specific CSS provide overview, registry, device detail, telemetry, command center and security-event views. The cryptographic protocol and existing mutation endpoints are unchanged.
+
+Start the broker, FastAPI and three devices in separate terminals, using the provisioned ACTIVE identities from the installation section:
+
+```powershell
+& .\runtime\tools\mosquitto\mosquitto.exe -c .\runtime\mqtt\mosquitto.conf
+```
+
+```powershell
+$env:SECUREMESH_MQTT_ENABLED='true'
+.\.venv\Scripts\python.exe -m securemesh.server.main
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m securemesh.device.main --device-id device-01 --interval 1
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m securemesh.device.main --device-id device-02 --interval 1
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m securemesh.device.main --device-id device-03 --interval 1
+```
+
+Open http://127.0.0.1:8000/ in your browser. Inspect all three registry entries, navigate to Command center and issue START, CHANGE_THRESHOLD and STOP to their respective devices. Review each confirmation, then observe EXECUTED and the authenticated acknowledgement. Device detail exposes certificate metadata, session history and current accepted simulator state; it also offers session rotation and confirmed revocation. Revocation is permanent for that registration: use disposable identities for demonstration.
+
+One read-only `GET /api/dashboard` endpoint provides exact database totals, public registry metadata, certificate validity dates, live-session state, latest readings and bounded histories. Optional `device_id` scopes histories to one device. The default history limit is 200 (maximum 500); view filters apply to the labeled recent window. Unknown backend event types remain INFO, and administrative revocation/invalidation is distinct from blocked communication.
+
+A single request refreshes the snapshot every five seconds; hidden tabs pause, errors back off to 30 seconds, and mutation completion refreshes immediately. Failed requests preserve visible data with a stale-data notice. Command drafts and keyboard focus survive refreshes. The visual system and actual API map are documented in [docs/DESIGN.md](docs/DESIGN.md).
+
+**Local trust boundary:** no administrator login is implemented. Keep FastAPI bound to loopback and restrict local operator access. The dashboard exposes accepted telemetry and public metadata, never private keys, CA private keys, session keys, shared secrets or broker credentials. Browser controls supplement backend authorization; they do not replace it.
+
+### Dashboard validation
+
+Install the existing test extras. Browser tests use installed Microsoft Edge/Chrome on Windows or `SECUREMESH_BROWSER_EXE`; if neither exists, install Playwright Chromium:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+# Only when an installed supported browser is unavailable:
+.\.venv\Scripts\python.exe -m playwright install chromium
+```
+
+Run real-browser and backend checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/frontend tests/integration/test_dashboard_api.py -v
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pip check
+git diff --check
+```
+
+The live dashboard test launches isolated Mosquitto, FastAPI and three actual simulators; it uses the rendered UI to issue all five commands, waits for authenticated ACKs, verifies restart and revocation, and checks security-event rendering. It creates disposable registrations and does not revoke your existing workspace devices. It captures desktop/mobile review images under ignored `runtime/stage4-review/`. The test requires Mosquitto and a supported browser and must pass without skipping for full Stage 4 validation. No frontend lint/type-check configuration exists; native module parsing, data mapping and interaction behavior are exercised in the real browser.

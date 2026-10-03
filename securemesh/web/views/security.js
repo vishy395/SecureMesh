@@ -1,0 +1,11 @@
+import {escapeHTML as e, timestamp, shortId, eventMatches} from '../format.js';
+import {title, fieldSelect, table, empty, status} from '../components/ui.js';
+export function security(data,ui) {
+  const filters = {device:ui.eventDevice,type:ui.eventType,status:ui.eventStatus,window:ui.eventWindow};
+  const rows = data.events.filter(event=>eventMatches(event,filters,data.generated_at));
+  return title('Security events','Recorded backend decisions. Blocked messages, successful operations and failures remain distinct.') +
+    `<div class="toolbar">${fieldSelect('Event type','eventType',[...new Set(data.events.map(event=>event.event_type))].sort(),ui.eventType,'All event types')}${fieldSelect('Device','eventDevice',data.devices.map(row=>row.device_id),ui.eventDevice,'All devices')}${fieldSelect('Decision','eventStatus',['BLOCKED','ACCEPTED','FAILED','INFO'],ui.eventStatus,'All decisions')}<div class="field"><label for="eventWindow">Time window</label><select id="eventWindow" data-key="eventWindow">${[['','Recent history'],['5','Last 5 minutes'],['60','Last hour'],['1440','Last 24 hours']].map(([value,label])=>`<option value="${value}"${value===ui.eventWindow?' selected':''}>${label}</option>`).join('')}</select></div></div>` +
+    `<p class="audit-note region">Showing ${rows.length} matching events from the latest ${data.history_limit} records. Times use your browser timezone. Unknown event types remain informational.</p>` +
+    (rows.length ? table(['Timestamp','Event type','Device','Session','Decision','Severity','Reason'],rows.map(event=>`<tr><td class="mono" title="${e(timestamp(event.recorded_at,true))}">${e(timestamp(event.recorded_at))}</td><td class="mono">${e(event.event_type.toUpperCase())}</td><td class="mono">${e(event.device_id||'System')}</td><td class="mono" title="${e(event.session_id||'')}">${e(shortId(event.session_id))}</td><td>${status(event.status)}</td><td class="small">${e(event.severity)}</td><td class="wrap muted">${e(event.reason)}</td></tr>`),'Security audit events') : empty(data.events.length?'No matching security events':'No security events',data.events.length?'Change the event type, device, decision or time filter.':'Authentication and command decisions will appear as the system operates.'));
+}
+

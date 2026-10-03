@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>SecureMesh · Control center</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to operational view</a>
+  <header class="topbar">
+    <a class="brand" href="#overview" aria-label="SecureMesh overview"><span class="brand-mark" aria-hidden="true">S/M</span><span>SecureMesh<small>Control center</small></span></a>
+    <div class="topbar-right"><span id="connection" role="status"><span class="indicator"></span>Connecting</span><time id="clock" class="mono"></time></div>
+  </header>
+  <div class="shell">
+    <aside class="sidebar">
+      <span class="eyebrow nav-label">Operations</span>
+      <nav aria-label="Primary navigation">
+        <a href="#overview" data-nav="overview"><span aria-hidden="true">01</span>Overview</a>
+        <a href="#devices" data-nav="devices"><span aria-hidden="true">02</span>Devices</a>
+        <a href="#telemetry" data-nav="telemetry"><span aria-hidden="true">03</span>Telemetry</a>
+        <a href="#commands" data-nav="commands"><span aria-hidden="true">04</span>Command center</a>
+        <a href="#security" data-nav="security"><span aria-hidden="true">05</span>Security events</a>
+      </nav>
+      <div class="sidebar-foot"><span class="eyebrow">Deployment</span><p>Trusted localhost</p><span class="small muted">Local operator access.<br>No administrator login.</span></div>
+    </aside>
+    <main id="main" tabindex="-1">
+      <div class="workspace-head"><span class="eyebrow" id="breadcrumb">Operations / Overview</span><div class="refresh-tools"><span id="sync" class="small mono muted">Waiting for backend</span><button id="refresh" class="quiet" type="button">Refresh</button></div></div>
+      <div id="notice" role="status" aria-live="polite"></div>
+      <div id="view"><div class="empty" role="status"><span class="eyebrow">Connecting</span><h1>Loading control center</h1><p>Reading the device registry and protected message history.</p></div></div>
+      <footer class="workspace-foot"><span>SecureMesh / protocol v1</span><span>Device identity · authenticated sessions · protected messages</span></footer>
+    </main>
+  </div>
+  <dialog id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-description">
+    <form method="dialog"><span class="eyebrow">Operator confirmation</span><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-actions"><button value="cancel" autofocus>Cancel</button><button id="confirm-action" value="confirm" class="primary">Confirm</button></div></form>
+  </dialog>
+  <noscript><p class="empty">JavaScript is required to load live registry data and issue commands.</p></noscript>
+</body>
+</html>
+

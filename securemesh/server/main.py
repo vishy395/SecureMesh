@@ -8,9 +8,13 @@ from queue import Empty
 from threading import Event, Thread
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+from securemesh.server.dashboard import dashboard_snapshot
 from pydantic import BaseModel, ConfigDict
-from securemesh.security.sessions import SecurityError
+from securemesh.security.sessions import SecurityError, now_ms
 from securemesh.server.repository import RegistryError
 from securemesh.commands import validate_parameters
 
@@ -108,7 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/health")
     def health() -> dict:
         transport = application.state.transport
-        return {"status": "running", "service": "SecureMesh control center", "stage": 3,
+        return {"status": "running", "service": "SecureMesh control center", "stage": 4,
                 "mqtt": "connected" if transport and transport.connected.is_set() else "disconnected" if transport else "disabled"}
 
     @application.get("/api/devices")
@@ -177,6 +181,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except SecurityError as exc:
             raise HTTPException(409,exc.code) from exc
 
+
+    @application.get('/api/dashboard')
+    def dashboard(device_id: str | None = None, limit: int = Query(200, ge=1, le=500)) -> dict:
+        try:
+            if device_id is not None:
+                validate_device_id(device_id)
+            snapshot = dashboard_snapshot(application.state.service.repository,device_id,limit,now_ms())
+            snapshot['health'] = health()
+            return snapshot
+        except LookupError as exc:
+            raise HTTPException(404,'unknown_device') from exc
+        except ValueError as exc:
+            raise HTTPException(422,'invalid_device_id') from exc
+
+    web = Path(__file__).resolve().parents[1] / 'web'
+    application.mount('/assets', StaticFiles(directory=web), name='dashboard-assets')
+
+    @application.middleware('http')
+    async def dashboard_headers(request, call_next):
+        response = await call_next(request)
+        if request.url.path == '/' or request.url.path.startswith('/assets/'):
+            response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['Referrer-Policy'] = 'no-referrer'
+        if request.url.path == '/api/dashboard':
+            response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    @application.get('/', include_in_schema=False)
+    def dashboard_page():
+        return FileResponse(web / 'index.html', headers={'Cache-Control': 'no-store'})
 
     return application
 
